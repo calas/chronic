@@ -4,4 +4,3 @@ def p(val)
   p_orig val
   puts
 end
-
