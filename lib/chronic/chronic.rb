@@ -26,9 +26,9 @@ module Chronic
     #
     #     By default, the parser will guess a single point in time for the
     #     given date or time.  +:guess+ => +true+ or +"middle"+ will return the middle
-		#     value of the range.  If +"start"+ is specified, Chronic::Span will return the
-		#     beginning of the range.  If +"end"+ is specified, the last value in
-		#     Chronic::Span will be returned. If you'd rather have the entire time span returned,
+    #     value of the range.  If +"start"+ is specified, Chronic::Span will return the
+    #     beginning of the range.  If +"end"+ is specified, the last value in
+    #     Chronic::Span will be returned. If you'd rather have the entire time span returned,
     #     set <tt>:guess</tt> to +false+ and a Chronic::Span will be returned.
     #
     # [<tt>:ambiguous_time_range</tt>]
@@ -42,29 +42,43 @@ module Chronic
     #     will be made, and the first matching instance of that time will
     #     be used.
     def parse(text, specified_options = {})
+      # strip any non-tagged tokens
+      @tokens = tokenize(text, specified_options).select { |token| token.tagged? }
+
+      if Chronic.debug
+        puts "+---------------------------------------------------"
+        puts "| " + @tokens.to_s
+        puts "+---------------------------------------------------"
+      end
+
+      options = default_options(specified_options)
+
+      # do the heavy lifting
+      begin
+        span = self.tokens_to_span(@tokens, options)
+      rescue
+        raise
+        return nil
+      end
+
+      # guess a time within a span if required
+      if options[:guess]
+        return self.guess(span, options[:guess])
+      else
+        return span
+      end
+    end
+
+    def strip_tokens(text, specified_options = {})
+      # strip any tagged tokens
+      return tokenize(text, specified_options).select { |token| !token.tagged? }.map { |token| token.word }.join(' ')
+    end
+
+    # Returns an array with text tokenized by the respective classes
+    def tokenize(text, specified_options = {})
       @text = text
 
-      # get options and set defaults if necessary
-      default_options = {:context => :future,
-                         :now => Chronic.time_class.now,
-                         :guess => true,
-												 :guess_how => :middle,
-                         :ambiguous_time_range => 6,
-                         :endian_precedence => nil}
-      options = default_options.merge specified_options
-
-      # handle options that were set to nil
-      options[:context] = :future unless options[:context]
-      options[:now] = Chronic.time_class.now unless options[:context]
-      options[:ambiguous_time_range] = 6 unless options[:ambiguous_time_range]
-
-      # ensure the specified options are valid
-      specified_options.keys.each do |key|
-        default_options.keys.include?(key) || raise(InvalidArgumentException, "#{key} is not a valid option key.")
-      end
-      [:past, :future, :none].include?(options[:context]) || raise(InvalidArgumentException, "Invalid value ':#{options[:context]}' for :context specified. Valid values are :past and :future.")
-			["start", "middle", "end", true, false].include?(options[:guess]) || validate_percentness_of(options[:guess]) || raise(InvalidArgumentException, "Invalid value ':#{options[:guess]}' for :guess how specified. Valid values are true, false, \"start\", \"middle\", and \"end\".  true will default to \"middle\". :guess can also be a percent(0.60)")
-
+      options = default_options(specified_options)
       # store now for later =)
       @now = options[:now]
 
@@ -86,40 +100,17 @@ module Chronic
         @tokens = tokenizer.scan(@tokens)
       end
 
-      # strip any non-tagged tokens
-      @tokens = @tokens.select { |token| token.tagged? }
-
-      if Chronic.debug
-        puts "+---------------------------------------------------"
-        puts "| " + @tokens.to_s
-        puts "+---------------------------------------------------"
-      end
-
-      # do the heavy lifting
-      begin
-        span = self.tokens_to_span(@tokens, options)
-      rescue
-        raise
-        return nil
-      end
-
-      # guess a time within a span if required
-      if options[:guess]
-        return self.guess(span, options[:guess])
-      else
-        return span
-      end
+      return @tokens
     end
 
-    def strip_tokens(text, specified_options = {})
-      @text = text
-
+    def default_options(specified_options)
       # get options and set defaults if necessary
       default_options = {:context => :future,
-                         :now => Chronic.time_class.now,
-                         :guess => true,
-                         :ambiguous_time_range => 6,
-                         :endian_precedence => nil}
+        :now => Chronic.time_class.now,
+        :guess => true,
+        :guess_how => :middle,
+        :ambiguous_time_range => 6,
+        :endian_precedence => nil}
       options = default_options.merge specified_options
 
       # handle options that were set to nil
@@ -132,27 +123,9 @@ module Chronic
         default_options.keys.include?(key) || raise(InvalidArgumentException, "#{key} is not a valid option key.")
       end
       [:past, :future, :none].include?(options[:context]) || raise(InvalidArgumentException, "Invalid value ':#{options[:context]}' for :context specified. Valid values are :past and :future.")
+      ["start", "middle", "end", true, false].include?(options[:guess]) || validate_percentness_of(options[:guess]) || raise(InvalidArgumentException, "Invalid value ':#{options[:guess]}' for :guess how specified. Valid values are true, false, \"start\", \"middle\", and \"end\".  true will default to \"middle\". :guess can also be a percent(0.60)")
 
-      # store now for later =)
-      @now = options[:now]
-
-      # put the text into a normal format to ease scanning
-      text = self.pre_normalize(text)
-
-      # get base tokens for each word
-      @tokens = self.base_tokenize(text)
-
-      # scan the tokens with each token scanner
-      [Repeater].each do |tokenizer|
-        @tokens = tokenizer.scan(@tokens, options)
-      end
-
-      [Grabber, Pointer, Scalar, Ordinal, Separator, TimeZone].each do |tokenizer|
-        @tokens = tokenizer.scan(@tokens)
-      end
-
-      # strip any tagged tokens
-      return @tokens.select { |token| !token.tagged? }.map { |token| token.word }.join(' ')
+      return options
     end
 
     # Clean up the specified input text by stripping unwanted characters,
@@ -199,7 +172,7 @@ module Chronic
 
       normalized_text = numericize_ordinals(normalized_text)
     end
-  
+
     # Convert number words to numbers (three => 3)
     def numericize_numbers(text) #:nodoc:
       Numerizer.numerize(text)
@@ -224,25 +197,25 @@ module Chronic
         # This most likely will happen when dealing with a Daylight Saving Time start
         # or end day.
         gmt_offset_diff = span.begin.gmt_offset - span.end.gmt_offset
-				case guess
-				when "start"
-					span.begin
-				when true, "middle"
-					span.begin + ((span.width - gmt_offset_diff) / 2)
-				when "end"
-					span.begin + (span.width - gmt_offset_diff)
-				else
-					span.begin + ((span.width - gmt_offset_diff) * guess)
-				end
+        case guess
+        when "start"
+          span.begin
+        when true, "middle"
+          span.begin + ((span.width - gmt_offset_diff) / 2)
+        when "end"
+          span.begin + (span.width - gmt_offset_diff)
+        else
+          span.begin + ((span.width - gmt_offset_diff) * guess)
+        end
       else
         span.begin
       end
     end
 
-		# Validates numericality of something
-		def validate_percentness_of(number) #:nodoc:
-			number.to_s.to_f == number && number >= 0 && number <= 1
-		end
+    # Validates numericality of something
+    def validate_percentness_of(number) #:nodoc:
+      number.to_s.to_f == number && number >= 0 && number <= 1
+    end
   end
 
   class Token #:nodoc:
